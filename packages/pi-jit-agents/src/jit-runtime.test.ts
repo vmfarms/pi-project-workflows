@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import type { AssistantMessage, Model } from "@mariozechner/pi-ai";
 import { AgentDispatchError } from "./errors.js";
-import { buildPhantomTool, executeAgent, normalizeToolChoice } from "./jit-runtime.js";
+import { buildPhantomTool, executeAgent, normalizeToolChoice, normalizeVerdict } from "./jit-runtime.js";
 import type { CompiledAgent } from "./types.js";
 
 const FIXTURES_DIR = path.resolve(import.meta.dirname, "..", "test-fixtures");
@@ -223,5 +223,81 @@ describe("executeAgent", () => {
 			),
 			(err: unknown) => err instanceof AgentDispatchError && /network down/.test((err as Error).message),
 		);
+	});
+});
+
+// Regression: T-Monitor trial (2026-05-24) found that text-verdict classifier
+// outputs were being stamped `clean` in the persisted trace, masking real
+// FLAG/NEW verdicts from any downstream analysis of `.workflows/monitors/*.jsonl`.
+// The monitor runtime in pi-behavior-monitors parsed the same text correctly via
+// parseVerdict() and still triggered steers — but trace files lied. The single
+// substantive FLAG of the trial (nt04 wrong-host-attribution) was only recovered
+// by re-parsing raw classify_response text. normalizeVerdict now mirrors
+// parseVerdict's text-shape parsing so the trace reflects the real verdict.
+describe("normalizeVerdict (text-verdict regression)", () => {
+	it("parses bare CLEAN string as clean verdict", () => {
+		assert.deepStrictEqual(normalizeVerdict("CLEAN"), { verdict: "clean" });
+	});
+
+	it("parses CLEAN with trailing commentary as clean verdict", () => {
+		assert.deepStrictEqual(normalizeVerdict("CLEAN — nothing to flag"), { verdict: "clean" });
+	});
+
+	it("parses FLAG: <description> as flag verdict (T-Monitor nt04 shape)", () => {
+		const text =
+			"FLAG: wrong-host-attribution: Answer claims Coraza WAF/Caddy runs on hany-01 via swarm DNS routing, but tool results show the managed_coraza-waf service was actually found running on hany-02";
+		const result = normalizeVerdict(text);
+		assert.strictEqual(result.verdict, "flag");
+		assert.ok(
+			result.description?.startsWith("wrong-host-attribution:"),
+			`expected flag description, got: ${result.description}`,
+		);
+	});
+
+	it("parses NEW: <pattern> | <description> as new verdict with pattern", () => {
+		assert.deepStrictEqual(normalizeVerdict("NEW: hardcoded-secret | Found an API key in source"), {
+			verdict: "new",
+			newPattern: "hardcoded-secret",
+			description: "Found an API key in source",
+		});
+	});
+
+	it("parses NEW: <pattern> (no pipe) as new verdict with pattern as description", () => {
+		assert.deepStrictEqual(normalizeVerdict("NEW: hardcoded-secret"), {
+			verdict: "new",
+			newPattern: "hardcoded-secret",
+			description: "hardcoded-secret",
+		});
+	});
+
+	it("trims whitespace before classifier verdict tokens", () => {
+		assert.deepStrictEqual(normalizeVerdict("  CLEAN"), { verdict: "clean" });
+		assert.deepStrictEqual(normalizeVerdict("\nFLAG: stuff"), { verdict: "flag", description: "stuff" });
+	});
+
+	it("falls back to clean for unparseable free-text output (existing behavior preserved)", () => {
+		const result = normalizeVerdict("just some free-form agent commentary");
+		assert.strictEqual(result.verdict, "clean");
+		assert.strictEqual(result.description, "just some free-form agent commentary");
+	});
+
+	it("preserves object-output path: schema-validated verdict (Sonnet tool-call path)", () => {
+		const result = normalizeVerdict({ verdict: "FLAG", description: "issue X", severity: "warning" });
+		assert.deepStrictEqual(result, { verdict: "flag", description: "issue X", severity: "warning" });
+	});
+
+	it("preserves object-output path: NEW with pattern field", () => {
+		const result = normalizeVerdict({ verdict: "NEW", description: "new issue", newPattern: "pat-1" });
+		assert.deepStrictEqual(result, { verdict: "new", description: "new issue", newPattern: "pat-1" });
+	});
+
+	it("stringifies non-verdict object output (workflow agent step result)", () => {
+		const result = normalizeVerdict({ stepResult: { completed: true, summary: "done" } });
+		assert.strictEqual(result.verdict, "clean");
+		assert.ok(result.description?.includes("stepResult"));
+	});
+
+	it("returns clean with empty description for undefined output", () => {
+		assert.deepStrictEqual(normalizeVerdict(undefined), { verdict: "clean", description: "" });
 	});
 });

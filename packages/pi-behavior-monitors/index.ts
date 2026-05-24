@@ -139,9 +139,7 @@ export interface MonitorScope {
 	target: "main" | "subagent" | "all" | "workflow";
 	/**
 	 * Spec-only filter fields — defined in monitor JSON specs for documentation
-	 * and future use, but NOT enforced at runtime. The activate() path checks
-	 * scope.target for steer delivery gating but does not inspect these filter
-	 * fields.
+	 * and future use, but NOT enforced at runtime.
 	 *
 	 * Cannot be enforced currently: ExtensionContext and event types
 	 * (AgentEndEvent, TurnEndEvent, MessageEndEvent, etc.) do not expose
@@ -149,14 +147,35 @@ export interface MonitorScope {
 	 * pi extension API would need to surface this metadata — likely via
 	 * ExtensionContext fields (e.g. ctx.agentName, ctx.workflowName,
 	 * ctx.stepName) or as event payload fields — before activate() can
-	 * match against these filters. Until then, all monitors fire
-	 * regardless of filter values, gated only by scope.target.
+	 * match against these filters. Until then, scope.filter values are
+	 * loaded but not used; scope.target is the only enforced gate.
 	 */
 	filter?: {
 		agent_type?: string[];
 		step_name?: string;
 		workflow?: string;
 	};
+}
+
+/**
+ * Whether `monitor` should dispatch its classifier on a primary-context event
+ * (one of `message_end`, `turn_end`, `agent_end`, `tool_call`, `command`).
+ *
+ * The bundled monitors register handlers via `pi.on(...)` for primary-context
+ * events only. Pi does not currently expose a separate subagent/workflow event
+ * channel, so monitors with `scope.target` of `subagent` or `workflow` cannot
+ * be matched against the active agent context — the safe behavior is to NOT
+ * dispatch them on primary-context events (otherwise a bundled-but-silenced
+ * subagent classifier still calls its model on every main-agent tool_call,
+ * burning latency and, if its provider is configured, cost).
+ *
+ * Returns false for `subagent` and `workflow` targets; true for `main` and
+ * `all`. Once pi surfaces agent/workflow identity on events, `scope.filter`
+ * values can be matched here as well.
+ */
+export function shouldDispatchOnPrimaryContext(monitor: Pick<Monitor, "scope">): boolean {
+	const target = monitor.scope.target;
+	return target === "main" || target === "all";
 }
 
 export interface MonitorAction {
@@ -1610,6 +1629,12 @@ async function activate(
 ): Promise<void> {
 	if (!monitorsEnabled) return;
 	if (monitor.dismissed) return;
+	// Subagent/workflow-scoped monitors must not dispatch on primary-context events.
+	// Without this gate, a monitor that has been silenced for the main agent (via
+	// e.g. scope.target: "subagent" overrides) still calls its classifier on every
+	// activation — burning latency, and dollar cost if the underlying provider is
+	// reachable. See shouldDispatchOnPrimaryContext() above.
+	if (!shouldDispatchOnPrimaryContext(monitor)) return;
 
 	// check excludes
 	for (const ex of monitor.classify.excludes) {
@@ -2294,6 +2319,9 @@ export default function (pi: ExtensionAPI) {
 
 				for (const m of group) {
 					if (m.dismissed) continue;
+					// Subagent/workflow-scoped monitors must not dispatch on primary-context
+					// tool_call events (same rationale as activate() above).
+					if (!shouldDispatchOnPrimaryContext(m)) continue;
 
 					// check excludes — skip this monitor if any excluded monitor already steered
 					let excluded = false;

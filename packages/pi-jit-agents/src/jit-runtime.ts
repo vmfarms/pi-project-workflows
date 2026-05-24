@@ -97,9 +97,21 @@ function deepRedact(value: unknown, config?: RedactionConfig): unknown {
  * arbitrary structured output or text; in that case we synthesize a `clean`
  * verdict and attach a description so the trace remains schema-valid.
  *
+ * Text-verdict outputs: classifier agents running against backends that do not
+ * honor forced toolChoice (vllm openai-compat being the discovered case) cannot
+ * produce a schema-validated tool call. The model emits the verdict as plain
+ * text in `CLEAN` / `FLAG: <desc>` / `NEW: <pattern> | <desc>` shape, and the
+ * monitor runtime in `@davidorex/pi-behavior-monitors` (`parseVerdict`) parses
+ * it directly to drive steers. The trace normalizer mirrors that parsing here
+ * so the persisted `verdict_decision` reflects the real verdict instead of
+ * stamping every text-mode classification as `clean`. Keep this parser in sync
+ * with `parseVerdict` in `packages/pi-behavior-monitors/index.ts` — they are
+ * deliberately duplicated to avoid a circular dep (pi-behavior-monitors already
+ * depends on pi-jit-agents).
+ *
  * `error` is reserved for the failure path (set in the catch handler).
  */
-function normalizeVerdict(output: unknown): {
+export function normalizeVerdict(output: unknown): {
 	verdict: "clean" | "flag" | "new" | "error";
 	description?: string;
 	severity?: string;
@@ -116,11 +128,39 @@ function normalizeVerdict(output: unknown): {
 			return result;
 		}
 	}
+	if (typeof output === "string") {
+		const parsed = parseTextVerdict(output);
+		if (parsed) return parsed;
+	}
 	// Non-verdict output (e.g. workflow agent step structured result, free text):
 	// stamp as `clean` and stringify-describe for trace fidelity.
 	const description =
 		typeof output === "string" ? output : output === undefined ? "" : JSON.stringify(output).slice(0, 2_000);
 	return { verdict: "clean", description };
+}
+
+/**
+ * Parse a text-verdict string (`CLEAN` / `FLAG: <desc>` / `NEW: <pattern> | <desc>`)
+ * to the trace-normalized verdict shape. Returns `undefined` if the input does
+ * not match a recognized text-verdict format, so the caller can fall through to
+ * the default `clean` stamping.
+ *
+ * Mirrors `parseVerdict` from `@davidorex/pi-behavior-monitors/index.ts` —
+ * keep in sync; see normalizeVerdict() for why the logic is duplicated.
+ */
+function parseTextVerdict(raw: string): ReturnType<typeof normalizeVerdict> | undefined {
+	const text = raw.trim();
+	if (text.startsWith("CLEAN")) return { verdict: "clean" };
+	if (text.startsWith("NEW:")) {
+		const rest = text.slice(4);
+		const pipe = rest.indexOf("|");
+		if (pipe !== -1) {
+			return { verdict: "new", newPattern: rest.slice(0, pipe).trim(), description: rest.slice(pipe + 1).trim() };
+		}
+		return { verdict: "new", newPattern: rest.trim(), description: rest.trim() };
+	}
+	if (text.startsWith("FLAG:")) return { verdict: "flag", description: text.slice(5).trim() };
+	return undefined;
 }
 
 /**

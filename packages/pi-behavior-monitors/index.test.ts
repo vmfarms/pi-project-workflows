@@ -19,6 +19,7 @@ import {
 	parseMonitorsArgs,
 	parseVerdict,
 	SCOPE_TARGETS,
+	shouldDispatchOnPrimaryContext,
 	VALID_EVENTS,
 	VERDICT_TYPES,
 	WHEN_CONDITIONS,
@@ -1255,5 +1256,42 @@ describe("collectAssistantText", () => {
 			]),
 		];
 		expect(collectAssistantText(branch as any)).toBe("visible");
+	});
+});
+
+// =============================================================================
+// shouldDispatchOnPrimaryContext (scope.target gate)
+// =============================================================================
+//
+// Regression: T-Monitor trial (2026-05-24) observed bundled monitors firing on
+// primary-context events despite project-scope overrides that set
+// `scope.target: "subagent"` with a never-matching agent filter. The bundled
+// `unauthorized-action` (event: tool_call) dispatched 24 times in a single
+// 8-prompt A/B run, failing fast on missing OPENAI_API_KEY in the trial env —
+// but in any env where the bundled provider IS reachable, those dispatches
+// would have called the (silenced!) Sonnet classifier and burned cost. The
+// scope.target gate now skips subagent/workflow-scoped monitors on
+// primary-context events; only main/all targets dispatch.
+describe("shouldDispatchOnPrimaryContext", () => {
+	it("returns true for scope.target='main' (standard primary-agent monitor)", () => {
+		expect(shouldDispatchOnPrimaryContext({ scope: { target: "main" } })).toBe(true);
+	});
+
+	it("returns true for scope.target='all' (broadly-scoped monitor)", () => {
+		expect(shouldDispatchOnPrimaryContext({ scope: { target: "all" } })).toBe(true);
+	});
+
+	it("returns false for scope.target='subagent' (T-Monitor silencing pattern)", () => {
+		// This is the exact override shape that the T-Monitor trial used to silence
+		// the bundled `unauthorized-action` / `commit-hygiene` / `work-quality` monitors.
+		expect(
+			shouldDispatchOnPrimaryContext({
+				scope: { target: "subagent", filter: { agent_type: ["__tmonitor_never__"] } },
+			}),
+		).toBe(false);
+	});
+
+	it("returns false for scope.target='workflow' (no primary-context applicability)", () => {
+		expect(shouldDispatchOnPrimaryContext({ scope: { target: "workflow" } })).toBe(false);
 	});
 });
