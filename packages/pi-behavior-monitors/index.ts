@@ -611,6 +611,19 @@ function collectCustomMessages(branch: SessionEntry[]): string {
 	const msgs: string[] = [];
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
+		// Canonical pi 0.75.5+ shape: LLM-visible custom messages persist as
+		// CustomMessageEntry (type: "custom_message") with top-level customType +
+		// content. Without this branch the collector misses pi-hindsight's
+		// `hindsight-recall` injection entirely. See iter-23 RCA.
+		if (entry.type === "custom_message") {
+			const e = entry as unknown as { customType?: string; content?: unknown };
+			if (e.customType) {
+				const content = typeof e.content === "string" ? e.content : extractUserText(e.content as any);
+				msgs.unshift(`[${e.customType}] ${content}`);
+			}
+			continue;
+		}
+		// Legacy shape: SessionMessageEntry with role:"custom" + customType nested in entry.message.
 		if (!isMessageEntry(entry)) continue;
 		if (entry.message.role === "user") break;
 		const msg = entry.message as unknown as Record<string, unknown>;
