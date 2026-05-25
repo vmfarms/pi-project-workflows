@@ -1836,10 +1836,25 @@ async function activate(
 			renderedAdvisory,
 			`(Advisory only — no correction turn dispatched. Pattern is structural; flag is for operator awareness.)`,
 		].join("\n");
-		pi.sendMessage<MonitorMessageDetails>(
-			{ customType: "monitor-advisory", content: advisoryContent, display: true, details: advisoryDetails },
-			{ triggerTurn: false },
-		);
+		// iter-20 fix: same isStreaming race as the iter-18 steer dispatch fix.
+		// When activate() runs inside the agent_end handler, pi-agent-core's
+		// Agent is STILL streaming (isStreaming=true; flips false only after
+		// finishRun() AFTER all agent_end listeners settle — see iter-18 final
+		// report PRIMARY-2). In that state, sendCustomMessage with
+		// triggerTurn:false (and no deliverAs) falls into the `isStreaming`
+		// branch and queues into agent.steeringQueue with NO consumer in
+		// scripted RPC mode — the message is silently dropped and never
+		// emitted as message_end. Wrapping in setTimeout(0) defers past
+		// finishRun() → isStreaming=false → the "else" branch fires which
+		// appends to state AND emits message_start/end. iter-18 fixed this
+		// for steer (triggerTurn:true) at line 1790; iter-20 extends the
+		// fix to advisory (triggerTurn:false) for the same reason.
+		setTimeout(() => {
+			pi.sendMessage<MonitorMessageDetails>(
+				{ customType: "monitor-advisory", content: advisoryContent, display: true, details: advisoryDetails },
+				{ triggerTurn: false },
+			);
+		}, 0);
 	}
 
 	monitor.whileCount++;
