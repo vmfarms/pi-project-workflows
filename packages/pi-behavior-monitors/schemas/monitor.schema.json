@@ -114,6 +114,10 @@
 					"type": ["string", "null"],
 					"description": "Message to inject into conversation. Null = no steering."
 				},
+				"advisory": {
+					"type": ["string", "null"],
+					"description": "Operator-visible advisory message logged + persisted in the session as a monitor-advisory custom message. Unlike steer, never dispatched as a forced correction turn. Use for structural defects (e.g., tool-budget overruns) that cannot be retroactively corrected in the agent's text."
+				},
 				"write": {
 					"type": "object",
 					"required": ["path", "merge"],

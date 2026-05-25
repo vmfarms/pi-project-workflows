@@ -496,6 +496,40 @@ describe("bundled templates: shared iteration-grace partial", () => {
 	}
 });
 
+describe("advisory action — schema + render shape (iter-18 SECONDARY)", () => {
+	it("MonitorAction.advisory accepts a string template", () => {
+		// Type-level + runtime validation: an action with both steer and advisory
+		// is well-formed (the dispatch decision is made by activate() at runtime
+		// based on which fields are set; the type allows any combination).
+		const action: import("./index").MonitorAction = {
+			advisory: "Tool budget exceeded: {{ description }} — structural defect.",
+		};
+		expect(action.advisory).toBeTruthy();
+		const rendered = nunjucks.renderString(action.advisory ?? "", { description: "26 tool calls" });
+		expect(rendered).toContain("26 tool calls");
+		expect(rendered).toContain("structural defect");
+	});
+
+	it("MonitorAction.advisory + steer can coexist on the same action", () => {
+		const action: import("./index").MonitorAction = {
+			steer: "Re-evaluate and produce a corrected answer.",
+			advisory: "Note: this pattern is structural; correction may have limited effect.",
+		};
+		expect(action.steer).toBeTruthy();
+		expect(action.advisory).toBeTruthy();
+	});
+
+	it("advisory renders the same nunjucks context as steer (description, severity, monitor_name)", () => {
+		const tpl = "Monitor {{ monitor_name }} at severity {{ severity }}: {{ description }}";
+		const rendered = nunjucks.renderString(tpl, {
+			monitor_name: "tool-budget-overrun",
+			severity: "warning",
+			description: "26 tool calls (budget: 12)",
+		});
+		expect(rendered).toBe("Monitor tool-budget-overrun at severity warning: 26 tool calls (budget: 12)");
+	});
+});
+
 describe("steer template rendering", () => {
 	it("literal steer string passes through nunjucks.renderString unchanged", () => {
 		const literal = "Commit your changes now.";

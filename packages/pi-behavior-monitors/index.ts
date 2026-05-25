@@ -180,6 +180,19 @@ export function shouldDispatchOnPrimaryContext(monitor: Pick<Monitor, "scope">):
 
 export interface MonitorAction {
 	steer?: string | null;
+	/**
+	 * Operator-visible advisory message — persisted as a `monitor-advisory`
+	 * custom message via `pi.sendMessage(..., { triggerTurn: false })`. Unlike
+	 * `steer`, NEVER triggers a forced correction turn. Use for structural
+	 * defects that cannot be retroactively corrected in the agent's text
+	 * (e.g., the iter-16 tool-budget-overrun pattern: by the time the count
+	 * is over budget, the budget is already spent).
+	 *
+	 * `steer` and `advisory` are NOT mutually exclusive: if both are set on
+	 * the same on_flag action, both fire (steer drives a correction turn AND
+	 * advisory is logged). Most patterns will use exactly one.
+	 */
+	advisory?: string | null;
 	learn_pattern?: boolean;
 	write?: {
 		path: string;
@@ -1760,11 +1773,26 @@ async function activate(
 		].join("\n");
 
 		if (monitor.event === "agent_end" || monitor.event === "command") {
-			// Already post-loop or command context: deliver immediately
-			pi.sendMessage<MonitorMessageDetails>(
-				{ customType: "monitor-steer", content, display: true, details },
-				{ deliverAs: "steer", triggerTurn: true },
-			);
+			// agent_end fires while pi-agent-core's Agent is STILL inside its
+			// runWithLifecycle (isStreaming = true, activeRun set; finishRun()
+			// flips them only AFTER all agent_end listeners settle — see the
+			// pi-agent-core agent.js docstring on the agent_end lifecycle).
+			// A direct sendMessage({deliverAs:"steer", triggerTurn:true}) from
+			// here takes the streaming branch in agent-session.js's
+			// sendCustomMessage and gets queued into agent.steeringQueue with
+			// no consumer in scripted mode (in TUI mode the queue is drained
+			// only when the operator types the next prompt — correction-by-
+			// accident). Defer via setTimeout(0) so the sendMessage call runs
+			// after finishRun(): isStreaming flips to false, the triggerTurn
+			// branch fires agent.prompt(), and a fresh agent_start/agent_end
+			// cycle is driven directly off the steer. (iter-18, iter-16 wiring
+			// gap closure.)
+			setTimeout(() => {
+				pi.sendMessage<MonitorMessageDetails>(
+					{ customType: "monitor-steer", content, display: true, details },
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+			}, 0);
 		} else {
 			// message_end / turn_end: buffer for drain at agent_end
 			// (pi's async event queue means these handlers run after the agent loop
@@ -1778,6 +1806,40 @@ async function activate(
 		// steeredThisTurn to suppress co-firing monitors, so it should only
 		// fire when a steer reaches the conversation.
 		steeredThisTurn.add(monitor.name);
+	}
+
+	// Advisory (operator-visible, never forces correction turn) — only for main scope.
+	// Independent of steer: a pattern can have advisory-only, steer-only, or both.
+	// iter-18 SECONDARY: pairs with structural-defect patterns (e.g., tool-budget-
+	// overrun) where the defect cannot be retroactively corrected in the agent's
+	// text, so triggering a correction turn would be wasteful.
+	if (action.advisory && monitor.scope.target === "main") {
+		const description = result.description ?? "Issue detected";
+		const advisoryContext = {
+			description,
+			verdict: result.verdict,
+			user_text: currentUserText,
+			severity: result.severity ?? "warning",
+			monitor_name: monitor.name,
+		};
+		const renderedAdvisory = nunjucks.renderString(action.advisory, advisoryContext);
+		const advisoryDetails: MonitorMessageDetails = {
+			monitorName: monitor.name,
+			verdict: result.verdict,
+			description,
+			steer: renderedAdvisory,
+			whileCount: monitor.whileCount + 1,
+			ceiling: monitor.ceiling,
+		};
+		const advisoryContent = [
+			`[monitor:${monitor.name} ADVISORY] ${description}`,
+			renderedAdvisory,
+			`(Advisory only — no correction turn dispatched. Pattern is structural; flag is for operator awareness.)`,
+		].join("\n");
+		pi.sendMessage<MonitorMessageDetails>(
+			{ customType: "monitor-advisory", content: advisoryContent, display: true, details: advisoryDetails },
+			{ triggerTurn: false },
+		);
 	}
 
 	monitor.whileCount++;
@@ -2216,6 +2278,13 @@ export default function (pi: ExtensionAPI) {
 		return box;
 	});
 
+	// --- monitor-advisory renderer (iter-18 SECONDARY: operator-visible, never steers) ---
+	pi.registerMessageRenderer("monitor-advisory", (message, _opts, theme) => {
+		const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
+		box.addChild(new Text(theme.fg("muted", String(message.content)), 0, 0));
+		return box;
+	});
+
 	// --- buffered steer drain ---
 	pi.on("agent_end", async () => {
 		// Drain buffered steers from message_end/turn_end monitors.
@@ -2228,12 +2297,23 @@ export default function (pi: ExtensionAPI) {
 			const remaining = pendingAgentEndSteers.slice(1);
 			pendingAgentEndSteers = [];
 
-			pi.sendMessage<MonitorMessageDetails>(
-				{ customType: "monitor-steer", content: first.content, display: true, details: first.details },
-				{ deliverAs: "steer", triggerTurn: true },
-			);
+			// Same setTimeout deferral as the agent_end direct path above —
+			// during this handler, the Agent is still in runWithLifecycle
+			// (isStreaming=true) and a direct sendMessage(triggerTurn:true)
+			// would only enqueue into the steeringQueue with no consumer.
+			// setTimeout(0) defers past finishRun() → isStreaming=false →
+			// sendCustomMessage takes the prompt() branch → new turn fires.
+			setTimeout(() => {
+				pi.sendMessage<MonitorMessageDetails>(
+					{ customType: "monitor-steer", content: first.content, display: true, details: first.details },
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+			}, 0);
 
-			// Surface remaining flagged issues as non-steering awareness
+			// Surface remaining flagged issues as non-steering awareness.
+			// triggerTurn:false; persist-only branch in sendCustomMessage is
+			// safe to call synchronously during agent_end since it doesn't
+			// gate on isStreaming.
 			if (remaining.length > 0) {
 				const summary = remaining.map((s) => `- [${s.monitor.name}] ${s.details.description}`).join("\n");
 				pi.sendMessage(
@@ -2363,9 +2443,16 @@ export default function (pi: ExtensionAPI) {
 							m.whileCount++;
 							updateStatus();
 
+							// iter-18 TERTIARY-b: prefix the block reason with a clear
+							// "[BLOCKED BY PRE-EXEC MONITOR]" marker so the agent's
+							// narrative reflects what actually happened. Without the
+							// prefix, the toolResult content reads as if it were the
+							// tool's own output and the agent's subsequent text often
+							// treats the destructive action as having succeeded.
+							const blockedReason = result.description || `Monitor '${m.name}' blocked: ${result.verdict}`;
 							return {
 								block: true,
-								reason: result.description || `Monitor '${m.name}' blocked: ${result.verdict}`,
+								reason: `[BLOCKED BY PRE-EXEC MONITOR ${m.name}] ${blockedReason}`,
 							};
 						}
 

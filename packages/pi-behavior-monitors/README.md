@@ -55,7 +55,8 @@ Create a `.monitor.json` file in `.pi/monitors/` conforming to `schemas/monitor.
 3. It collects relevant conversation context (tool results, assistant text, etc.)
 4. A side-channel LLM call classifies the context against the JSON pattern library
 5. Based on the verdict, the monitor executes actions:
-   - **steer**: inject a correction message into the conversation (main scope only)
+   - **steer**: inject a correction message into the conversation and force a new correction turn (main scope only)
+   - **advisory**: persist an operator-visible advisory message in the session but DO NOT force a correction turn (main scope only; for structural defects like tool-budget overruns that cannot be retroactively corrected)
    - **write**: append structured findings to a JSON file (any scope)
    - **learn**: add new patterns to the library automatically
 6. Downstream workflows can consume the JSON findings (e.g., issues.json → verify step → gate)
