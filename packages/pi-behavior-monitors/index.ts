@@ -34,6 +34,8 @@ import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import nunjucks from "nunjucks";
 
+import { installNullOutputMonitor } from "./heuristic-null-output.js";
+
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Package root is one level up from `dist/` at runtime (compiled `dist/index.js`),
@@ -1935,6 +1937,13 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 		description: "Path to a trace-config.json with custom redaction patterns layered atop the builtin set.",
 	});
+
+	// Heuristic null-output monitor — installed unconditionally (independent of
+	// classifier-monitor discovery). Respects the package-level `monitorsEnabled`
+	// flag so `/monitors off` disables it alongside the classifier monitors;
+	// also honors `PI_NULL_OUTPUT_MONITOR=off` env override. See
+	// `heuristic-null-output.ts` for rationale + decision rule.
+	installNullOutputMonitor(pi, { isEnabled: () => monitorsEnabled });
 
 	const { monitors, overrides } = discoverMonitors();
 	loadedMonitors = monitors;
