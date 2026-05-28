@@ -34,6 +34,7 @@ import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import nunjucks from "nunjucks";
 
+import { installAnnounceWithoutActMonitor } from "./heuristic-announce-without-act.js";
 import { installNullOutputMonitor } from "./heuristic-null-output.js";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -1944,6 +1945,13 @@ export default function (pi: ExtensionAPI) {
 	// also honors `PI_NULL_OUTPUT_MONITOR=off` env override. See
 	// `heuristic-null-output.ts` for rationale + decision rule.
 	installNullOutputMonitor(pi, { isEnabled: () => monitorsEnabled });
+
+	// Heuristic announce-without-act monitor — sibling to null-output. Targets
+	// the "substantive announce-intent visible + zero tool calls + stop"
+	// failure shape (2+ recurrence in Phase 5: phase5-t2-2 boundary, iter-30
+	// canonical). Currently OBSERVE-MODE (no steer dispatch). Respects
+	// `monitorsEnabled` and `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off` env override.
+	installAnnounceWithoutActMonitor(pi, { isEnabled: () => monitorsEnabled });
 
 	const { monitors, overrides } = discoverMonitors();
 	loadedMonitors = monitors;

@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Heuristic `announce-without-act` detector — sibling to null-output. Detects substantive thinking + announce-intent visible ("I'll investigate ...", "Let me check ...") + zero tool calls + clean stop, partitioned from null-output by a 50-char visible-length floor + 500-char ceiling + announce-position-within-first-100-chars-of-trimmed-visible constraint. Currently observe-mode (`actions: null`). Env toggle `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off`. Promotion to steer mode deferred until corpus accumulates 2+ accurate wild fires without FPs. See `heuristic-announce-without-act.ts` + tests.
+
 ## [0.14.6] - 2026-04-27
 
 ### Changed

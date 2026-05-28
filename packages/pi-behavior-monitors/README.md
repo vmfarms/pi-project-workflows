@@ -25,6 +25,15 @@ updates automatically.
 - **hedge** — detects when the agent deviates from what the user actually said (rephrasing questions, assuming intent, deflecting with counter-questions)
 - **work-quality** — on-demand audit of work quality (trial-and-error, not reading before editing, fixing symptoms instead of root causes). Invoked via `/work-quality`. Writes findings to `.project/issues.json`.
 
+## Heuristic monitors (regex + counts, no LLM dispatch)
+
+Installed unconditionally alongside the classifier-monitor framework. Both fire at `agent_end` and run in observe-mode by default; both respect `/monitors off` and dedicated env-var overrides.
+
+- **null-output** — qwen3-thinking-mode + vLLM stop-gap. Detects substantive thinking (≥200 chars) followed by a null-shaped visible (pure whitespace, empty `<think></think>` artifact, bare ``` opener) with zero tool calls and `stopReason == "stop"`. Default steers a re-prod prompt. Env toggle: `PI_NULL_OUTPUT_MONITOR=off`. Historical rate ~0.08% (4 / 4923 qwen turns). Source: `heuristic-null-output.ts`.
+- **announce-without-act** — Sibling to null-output, distinct domain. Detects substantive thinking (≥200 chars) followed by a SUBSTANTIVE announce-intent visible (50 ≤ length ≤ 500 chars, e.g. "I'll investigate ...", "Let me check ...") with the announce-intent regex matching within the first 100 chars of the left-trimmed visible, zero tool calls, and `stopReason == "stop"`. Currently **observe-mode** (logs to `pi.appendEntry`, no steer dispatch); promotion to steer deferred until 2+ accurate fires accumulate in the wild without FPs. Env toggle: `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off`. Historical recurrence ~0.33% (17 / 5097 turns) across 510 sessions. Source: `heuristic-announce-without-act.ts`.
+
+The two heuristic monitors partition cleanly by visible length: visible < 50 chars is null-output's domain; 50 ≤ visible ≤ 500 chars is announce-without-act's domain; visible > 500 chars is treated as a substantive answer and neither fires. iter-30 (canonical announce shape, visible 178 chars) fires on announce-without-act only; phase5-t2-2 (boundary, visible 21 chars `<think></think>` artifact) fires on null-output only.
+
 ## File Structure
 
 Each monitor is a triad of JSON files:
