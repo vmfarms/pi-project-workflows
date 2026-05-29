@@ -93,7 +93,7 @@ See references/bundled-resources.md for full inventory.
 | `user_text` | `{user_text}` / `{{ user_text }}` | Most recent user message text | — |
 | `assistant_text` | `{assistant_text}` / `{{ assistant_text }}` | Most recent assistant message text | — |
 | `tool_results` | `{tool_results}` / `{{ tool_results }}` | Tool results with tool name and error status | Last 5, truncated 2000 chars |
-| `tool_calls` | `{tool_calls}` / `{{ tool_calls }}` | Tool calls and results interleaved | Last 20, truncated 2000 chars |
+| `tool_calls` | `{tool_calls}` / `{{ tool_calls }}` | Tool calls and results interleaved | Last 40, truncated 2000 chars |
 | `custom_messages` | `{custom_messages}` / `{{ custom_messages }}` | Custom extension messages since last user message | — |
 | `project_vision` | `{project_vision}` / `{{ project_vision }}` | .project/project.json vision, core_value, name | — |
 | `project_conventions` | `{project_conventions}` / `{{ project_conventions }}` | .project/conformance-reference.json principle names | — |

@@ -88,7 +88,7 @@ export const COLLECTOR_DESCRIPTORS: CollectorDescriptor[] = [
 		description: "Tool results with tool name and error status",
 		limits: "Last 5, truncated 2000 chars",
 	},
-	{ name: "tool_calls", description: "Tool calls and results interleaved", limits: "Last 20, truncated 2000 chars" },
+	{ name: "tool_calls", description: "Tool calls and results interleaved", limits: "Last 40, truncated 2000 chars" },
 	{ name: "custom_messages", description: "Custom extension messages since last user message" },
 	{ name: "project_vision", description: ".project/project.json vision, core_value, name" },
 	{ name: "project_conventions", description: ".project/conformance-reference.json principle names" },
@@ -590,7 +590,7 @@ function collectToolResults(branch: SessionEntry[], limit = 5): string {
 	return results.reverse().join("\n");
 }
 
-function collectToolCalls(branch: SessionEntry[], limit = 20): string {
+function collectToolCalls(branch: SessionEntry[], limit = 40): string {
 	const calls: string[] = [];
 	for (let i = branch.length - 1; i >= 0 && calls.length < limit; i--) {
 		const entry = branch[i];
