@@ -1764,13 +1764,20 @@ async function activate(
 		const description = result.description ?? "Issue detected";
 		const annotation = result.verdict === "new" ? " — new pattern learned" : "";
 
-		// Render steer as Nunjucks template (literal strings pass through unchanged)
+		// Render steer as Nunjucks template (literal strings pass through unchanged).
+		// `whileCount` is the count of PRIOR fires (0 on first fire; 1 on second; …).
+		// Exposed so monitor.json templates can rotate steer text per retry via
+		// nunjucks {% if whileCount == N %} conditionals — keeps each retry's
+		// message distinct so the agent does not see the identical instruction
+		// it already ignored. (T-PreRegression-V3-FixBundle PRIMARY-3b, 2026-05-29.)
 		const steerContext = {
 			description,
 			verdict: result.verdict,
 			user_text: currentUserText,
 			severity: result.severity ?? "warning",
 			monitor_name: monitor.name,
+			whileCount: monitor.whileCount,
+			ceiling: monitor.ceiling,
 		};
 		const renderedSteer = nunjucks.renderString(action.steer, steerContext);
 
@@ -1831,12 +1838,16 @@ async function activate(
 	// text, so triggering a correction turn would be wasteful.
 	if (action.advisory && monitor.scope.target === "main") {
 		const description = result.description ?? "Issue detected";
+		// Same rotation variables exposed as steerContext; advisory templates can
+		// rotate too if the monitor author wants (T-PreRegression-V3-FixBundle).
 		const advisoryContext = {
 			description,
 			verdict: result.verdict,
 			user_text: currentUserText,
 			severity: result.severity ?? "warning",
 			monitor_name: monitor.name,
+			whileCount: monitor.whileCount,
+			ceiling: monitor.ceiling,
 		};
 		const renderedAdvisory = nunjucks.renderString(action.advisory, advisoryContext);
 		const advisoryDetails: MonitorMessageDetails = {

@@ -556,6 +556,40 @@ describe("steer template rendering", () => {
 		const rendered = env.renderString("Fix: {{ description }}", {});
 		expect(rendered).toBe("Fix: ");
 	});
+
+	// T-PreRegression-V3-FixBundle PRIMARY-3b: whileCount-based steer rotation.
+	// monitor.whileCount is the count of PRIOR fires (0 on first fire). Templates
+	// can rotate per retry via {% if whileCount == N %} so the agent does not see
+	// the identical instruction it just ignored.
+	it("steer rotates via {% if whileCount == N %} per retry", () => {
+		const tpl =
+			"{% if whileCount == 0 %}first{% elif whileCount == 1 %}second" +
+			"{% elif whileCount == 2 %}third{% elif whileCount == 3 %}fourth" +
+			"{% else %}final{% endif %}";
+		expect(nunjucks.renderString(tpl, { whileCount: 0 })).toBe("first");
+		expect(nunjucks.renderString(tpl, { whileCount: 1 })).toBe("second");
+		expect(nunjucks.renderString(tpl, { whileCount: 2 })).toBe("third");
+		expect(nunjucks.renderString(tpl, { whileCount: 3 })).toBe("fourth");
+		expect(nunjucks.renderString(tpl, { whileCount: 4 })).toBe("final");
+	});
+
+	it("steer rotation composes with {{ description }} interpolation", () => {
+		const tpl =
+			"{% if whileCount == 0 %}First: {{ description }}" +
+			"{% else %}Repeat ({{ whileCount }}): {{ description }}{% endif %}";
+		expect(nunjucks.renderString(tpl, { whileCount: 0, description: "broken thing" })).toBe("First: broken thing");
+		expect(nunjucks.renderString(tpl, { whileCount: 2, description: "broken thing" })).toBe("Repeat (2): broken thing");
+	});
+
+	it("steer rotation tolerates whileCount missing (back-compat with old templates)", () => {
+		// Old monitor.json templates that don't reference whileCount keep working
+		const oldTpl = "Just fix: {{ description }}";
+		expect(nunjucks.renderString(oldTpl, { description: "x" })).toBe("Just fix: x");
+		// New whileCount-aware template falls into {% else %} when whileCount is
+		// undefined (nunjucks treats undefined as truthy-false in numeric compares).
+		const newTpl = "{% if whileCount == 0 %}first{% else %}other{% endif %}";
+		expect(nunjucks.renderString(newTpl, {})).toBe("other");
+	});
 });
 
 // =============================================================================
