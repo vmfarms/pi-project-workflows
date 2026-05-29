@@ -325,6 +325,43 @@ describe("parseVerdict", () => {
 			description: "desc",
 		});
 	});
+
+	it("extracts CLEAN from multi-line Final: format (V4 classify.md)", () => {
+		const raw = ["Step 1 verdict: NO_CLAIM", "Step 2 verdict: N/A", "Step 3 verdict: NONE", "Final: CLEAN"].join("\n");
+		expect(parseVerdict(raw)).toEqual({ verdict: "clean" });
+	});
+
+	it("extracts FLAG from multi-line Final: format", () => {
+		const raw = [
+			"Step 1 verdict: ghost_db never scheduled due to multi-arch placement scheduler skip",
+			"Step 2 verdict: Wrong-field-drilled",
+			"Step 3 verdict: inspect ghost_db spec for actual Placement.TaskTemplate field",
+			"Final: FLAG: prior-vs-evidence: ghost_db failed due to multi-arch placement constraint | Docker Swarm placement priors | docker service inspect ghost_db raw JSON",
+		].join("\n");
+		expect(parseVerdict(raw)).toEqual({
+			verdict: "flag",
+			description:
+				"prior-vs-evidence: ghost_db failed due to multi-arch placement constraint | Docker Swarm placement priors | docker service inspect ghost_db raw JSON",
+		});
+	});
+
+	it("extracts NEW from multi-line Final: format", () => {
+		const raw = [
+			"Step 1 verdict: novel shape",
+			"Step 2 verdict: Prior",
+			"Step 3 verdict: NONE",
+			"Final: NEW:novel-shape-name|short description here",
+		].join("\n");
+		expect(parseVerdict(raw)).toEqual({
+			verdict: "new",
+			newPattern: "novel-shape-name",
+			description: "short description here",
+		});
+	});
+
+	it("tolerates leading whitespace before Final: marker", () => {
+		expect(parseVerdict("Step 1 verdict: NO_CLAIM\n  Final:   CLEAN")).toEqual({ verdict: "clean" });
+	});
 });
 
 // =============================================================================

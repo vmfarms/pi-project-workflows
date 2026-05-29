@@ -1163,7 +1163,13 @@ function formatInstructionsForPrompt(instructions: MonitorInstruction[]): string
 // =============================================================================
 
 export function parseVerdict(raw: string): ClassifyResult {
-	const text = raw.trim();
+	let text = raw.trim();
+	// Multi-line "Final:" format support (e.g., V4 prior-vs-evidence classify.md emits
+	// `Step N verdict: ...\n...\nFinal: CLEAN|FLAG:...|NEW:...`). If we find a `Final:`
+	// line, use its content as the verdict. Backward-compatible with single-line CLEAN/
+	// FLAG/NEW output (no `Final:` → falls through to existing startsWith checks).
+	const finalMatch = text.match(/^[ \t]*Final:[ \t]*(.+)$/m);
+	if (finalMatch) text = finalMatch[1].trim();
 	if (text.startsWith("CLEAN")) return { verdict: "clean" };
 	if (text.startsWith("NEW:")) {
 		const rest = text.slice(4);
