@@ -27,8 +27,13 @@
  * once steer is enabled.
  *
  * Toggle: respects the package-level `monitorsEnabled` flag (driven by
- * `/monitors on|off`). Additionally honors `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off`
- * as a hard-disable env override for debugging / replay harness use.
+ * `/monitors on|off`). Additionally honors:
+ *   - `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off`: hard-disable the whole monitor
+ *     (no audit, no steer)
+ *   - `PI_ANNOUNCE_WITHOUT_ACT_STEER=off`: disable JUST the steer dispatch
+ *     while keeping observe-mode audit (fail-soft toggle for the steer
+ *     promotion landed 2026-05-31 in T-Monitors-Bundle PRIMARY-5; lets the
+ *     operator yank a noisy steer in place while preserving the data signal)
  */
 
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
@@ -53,6 +58,18 @@ const ANNOUNCE_INTENT_PATTERNS: readonly RegExp[] = [
 	/\bStarting\s+(with|by)\b/i,
 	/\bFirst,?\s+I'll\b/i,
 ];
+
+/**
+ * Steer text dispatched when the monitor is in steer-mode and fires. Kept
+ * deliberately short + behavioral ("either run the commands or explain why
+ * you can't") to avoid prescribing a specific action while still
+ * communicating the failure mode. Mirrors the brevity of null-output's
+ * STEER_TEXT. Promoted from observe-mode 2026-05-31 in T-Monitors-Bundle
+ * PRIMARY-5 after 9 production fires in a single day with zero observed
+ * false positives (per ansible-v3 session JSONL audit).
+ */
+const STEER_TEXT =
+	"You announced intent without executing — either run the commands or explain why you can't.";
 
 export interface AnnounceWithoutActMetrics {
 	thinkingChars: number;
@@ -223,7 +240,11 @@ export function installAnnounceWithoutActMonitor(
 	// Surface "armed" status to stderr so live-dry-run verification can grep
 	// for evidence of installation. Quiet enough to not spam normal usage.
 	if (process.env.PI_ANNOUNCE_WITHOUT_ACT_MONITOR !== "off") {
-		console.error(`[announce-without-act] heuristic monitor installed (agent_end hook, mode=${mode})`);
+		const steerSuffix =
+			mode === "steer" && process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER === "off"
+				? " (steer dispatch DISABLED via PI_ANNOUNCE_WITHOUT_ACT_STEER=off; observe-mode audit still active)"
+				: "";
+		console.error(`[announce-without-act] heuristic monitor installed (agent_end hook, mode=${mode})${steerSuffix}`);
 	} else {
 		console.error("[announce-without-act] heuristic monitor DISABLED via PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off");
 	}
@@ -258,15 +279,37 @@ export function installAnnounceWithoutActMonitor(
 		}
 		if (metrics.userMessageId) firedUserMessageIds.add(metrics.userMessageId);
 
+		// Steer-mode: dispatch a deferred steer message + mark entry.steered.
+		// PI_ANNOUNCE_WITHOUT_ACT_STEER=off short-circuits the dispatch while
+		// preserving the audit entry (fail-soft toggle so operators can yank
+		// noisy steer in place without losing the signal).
+		const steerActive = mode === "steer" && process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER !== "off";
+		if (steerActive) {
+			entry.steered = true;
+		}
 		audit.push(entry);
 		pi.appendEntry(ANNOUNCE_WITHOUT_ACT_MONITOR_NAME, entry);
 
-		// Observe-mode: stop here. No steer dispatch. Promotion path:
-		//   1. accumulate ≥2 accurate wild fires + ≥1 stable-period without
-		//      FPs on the corpus
-		//   2. spec a follow-up track that flips `opts.steer = true` + wires
-		//      a setTimeout(0)-deferred sendMessage analogous to null-output's
-		//      pattern at line 213-222 of heuristic-null-output.ts
+		if (steerActive) {
+			// Deferred dispatch — see iter-18 wiring-gap fix in index.ts:1788-1808.
+			// During agent_end the Agent is still inside runWithLifecycle
+			// (isStreaming = true); a direct sendMessage({deliverAs:"steer",
+			// triggerTurn:true}) gets queued into steeringQueue with no consumer
+			// in scripted RPC mode. setTimeout(0) defers past finishRun() so
+			// the prompt() branch fires and a fresh agent_start/agent_end cycle
+			// runs. Mirrors heuristic-null-output's setTimeout(0) pattern at
+			// lines 213-222 — same race, same fix.
+			setTimeout(() => {
+				pi.sendMessage(
+					{
+						customType: "announce-without-act-recovery",
+						content: STEER_TEXT,
+						display: true,
+					},
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+			}, 0);
+		}
 	});
 
 	return { audit };

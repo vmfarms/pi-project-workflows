@@ -37,6 +37,15 @@
  * Toggle: respects the package-level `monitorsEnabled` flag. Additionally
  * honors `PI_THINKING_LOOP_MONITOR=off` as a hard-disable env override for
  * debugging / replay harness use.
+ *
+ * 2026-05-31: ALSO hooks `message_update` (specifically the `thinking_end`
+ * inner event) so loops that stall mid-stream — where `message_end` never
+ * fires because the agent times out before the message settles — are still
+ * caught while the in-flight thinking is observable. R7 ghost-db-mysql-
+ * rotation is the canonical case the prior message_end-only hook missed
+ * (T-Mechanism-Bundle PRIMARY-6 PARTIAL gap closure). The two hooks share
+ * the same dedupe set so a loop caught mid-stream does not double-fire when
+ * message_end later settles. See T-Monitors-Bundle PRIMARY-4 for rationale.
  */
 
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
@@ -206,34 +215,35 @@ export function installThinkingLoopMonitor(
 	opts: { isEnabled?: () => boolean; steer?: boolean } = {},
 ): { audit: ThinkingLoopAuditEntry[] } {
 	const audit: ThinkingLoopAuditEntry[] = [];
-	const firedKeys = new Set<string>(); // `${userMessageId}|${paragraphHash}`
+	const firedKeys = new Set<string>(); // `${userMessageId}|${paragraphHash}` — shared across hooks
 	const isEnabled = opts.isEnabled ?? (() => true);
 	const mode: "observe" | "steer" = opts.steer ? "steer" : "observe";
 
 	if (process.env.PI_THINKING_LOOP_MONITOR !== "off") {
 		console.error(
-			`[thinking-loop] heuristic monitor installed (message_end hook, mode=${mode})`,
+			`[thinking-loop] heuristic monitor installed (message_end + message_update[thinking_end] hooks, mode=${mode})`,
 		);
 	} else {
 		console.error("[thinking-loop] heuristic monitor DISABLED via PI_THINKING_LOOP_MONITOR=off");
 	}
 
-	pi.on("message_end", async (ev: unknown, ctx: ExtensionContext) => {
-		if (process.env.PI_THINKING_LOOP_MONITOR === "off") return;
-		if (!isEnabled()) return;
-
-		const event = ev as { message?: { id?: string; role?: string; content?: unknown } };
-		const msg = event?.message;
-		if (!msg || msg.role !== "assistant") return;
-
-		const branch = ctx.sessionManager.getBranch();
-		const metrics = analyzeMessage(msg, branch);
+	/**
+	 * Shared decision + emit path. Used by both message_end and
+	 * message_update[thinking_end] hooks. Dedupe key (userMessageId, paragraphHash)
+	 * is shared across both hooks so a loop caught mid-stream does not
+	 * double-fire when message_end later settles.
+	 *
+	 * `via` annotates the audit entry with which hook caught the loop;
+	 * useful for cross-iter analysis of mid-stream vs end-of-message catches.
+	 */
+	function emit(
+		msg: { id?: string; role?: string; content?: unknown },
+		branch: unknown[],
+		via: "message_end" | "message_update",
+	): void {
+		const metrics = analyzeMessage(msg as { id?: string; content?: unknown }, branch as never[]);
 		const decision = shouldFire(metrics);
-
-		if (!decision.fire) {
-			// Keep audit tight — only log fires + loop-limit suppressions.
-			return;
-		}
+		if (!decision.fire) return; // Keep audit tight — only log fires + loop-limit suppressions.
 
 		const dedupeKey = `${metrics.userMessageId ?? "?"}|${metrics.largestRepeatHash}`;
 		const entry: ThinkingLoopAuditEntry = {
@@ -242,10 +252,10 @@ export function installThinkingLoopMonitor(
 			fired: true,
 			mode,
 			steered: false,
-			reason: decision.reason,
+			reason: `${decision.reason} [via ${via}]`,
 		};
 		if (firedKeys.has(dedupeKey)) {
-			entry.reason = `loop-limit: already fired for (userMessage=${metrics.userMessageId}, paragraphHash=${metrics.largestRepeatHash})`;
+			entry.reason = `loop-limit: already fired for (userMessage=${metrics.userMessageId}, paragraphHash=${metrics.largestRepeatHash}) [via ${via}]`;
 			audit.push(entry);
 			pi.appendEntry(THINKING_LOOP_MONITOR_NAME, entry);
 			return;
@@ -260,6 +270,39 @@ export function installThinkingLoopMonitor(
 		//   2. spec a follow-up track that flips opts.steer = true + decides
 		//      the steer payload (likely "wrap up the current reasoning — you
 		//      appear to be looping on the same paragraph")
+	}
+
+	pi.on("message_end", async (ev: unknown, ctx: ExtensionContext) => {
+		if (process.env.PI_THINKING_LOOP_MONITOR === "off") return;
+		if (!isEnabled()) return;
+
+		const event = ev as { message?: { id?: string; role?: string; content?: unknown } };
+		const msg = event?.message;
+		if (!msg || msg.role !== "assistant") return;
+
+		const branch = ctx.sessionManager.getBranch();
+		emit(msg, branch, "message_end");
+	});
+
+	// message_update fires per token delta — many hundreds per turn. Guard
+	// early so the common case (text_delta / thinking_delta / toolcall_*) is
+	// effectively a no-op. We only analyze when a thinking block has just
+	// ENDED, because at that point the thinking content is stable in
+	// `partial.content` and a single fingerprint pass is correct.
+	pi.on("message_update", async (ev: unknown, ctx: ExtensionContext) => {
+		if (process.env.PI_THINKING_LOOP_MONITOR === "off") return;
+		if (!isEnabled()) return;
+
+		const event = ev as {
+			assistantMessageEvent?: { type?: string; partial?: { id?: string; role?: string; content?: unknown } };
+		};
+		const inner = event?.assistantMessageEvent;
+		if (!inner || inner.type !== "thinking_end") return;
+		const partial = inner.partial;
+		if (!partial || partial.role !== "assistant") return;
+
+		const branch = ctx.sessionManager.getBranch();
+		emit(partial, branch, "message_update");
 	});
 
 	return { audit };

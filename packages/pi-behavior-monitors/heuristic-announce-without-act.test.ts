@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { analyzeTurn, shouldFire } from "./heuristic-announce-without-act.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { analyzeTurn, installAnnounceWithoutActMonitor, shouldFire } from "./heuristic-announce-without-act.js";
 
 // Synthetic fixtures mirror the two known-positive shapes from Phase 5:
 //   - iter-30 (canonical): substantive announce-intent ("I'll investigate ...
@@ -198,5 +198,126 @@ describe("shouldFire (negative cases)", () => {
 		const branch = [makeUserEntry(), makeAssistantEntry({ thinking: "x".repeat(300), text: visible })];
 		const d = shouldFire(analyzeTurn(branch as any));
 		expect(d.fire).toBe(false);
+	});
+});
+
+// =============================================================================
+// installAnnounceWithoutActMonitor — steer-mode integration (2026-05-31)
+// =============================================================================
+//
+// Steer-mode promoted in T-Monitors-Bundle PRIMARY-5 after 9 production
+// fires in one day without observed false positives. These tests assert the
+// dispatch path: setTimeout(0)-deferred sendMessage with the canonical
+// STEER_TEXT + customType "announce-without-act-recovery", and the
+// PI_ANNOUNCE_WITHOUT_ACT_STEER=off fail-soft toggle.
+
+interface SentMessageRecord {
+	customType: string;
+	content: string;
+	display?: boolean;
+	opts: { deliverAs?: string; triggerTurn?: boolean };
+}
+
+function makePiStub() {
+	const handlers: Record<string, (ev: unknown, ctx: unknown) => Promise<void> | void> = {};
+	const appended: Array<{ name: string; entry: unknown }> = [];
+	const sent: SentMessageRecord[] = [];
+	const pi = {
+		on(event: string, handler: (ev: unknown, ctx: unknown) => Promise<void> | void) {
+			handlers[event] = handler;
+		},
+		appendEntry(name: string, entry: unknown) {
+			appended.push({ name, entry });
+		},
+		sendMessage(msg: { customType?: string; content?: string; display?: boolean }, opts: { deliverAs?: string; triggerTurn?: boolean }) {
+			sent.push({
+				customType: msg.customType ?? "",
+				content: msg.content ?? "",
+				display: msg.display,
+				opts,
+			});
+		},
+	} as never;
+	return { pi, handlers, appended, sent };
+}
+
+function makeFiringBranch() {
+	return [
+		makeUserEntry("u-firing-1"),
+		makeAssistantEntry({ thinking: "x".repeat(323), text: ITER30_VISIBLE }),
+	];
+}
+
+function makeCtxWithBranch(branch: unknown[]) {
+	return { sessionManager: { getBranch: () => branch } } as never;
+}
+
+async function flushSetTimeout() {
+	// setTimeout(0) defers to the next macrotask; await one tick to drain it.
+	await new Promise((r) => setTimeout(r, 0));
+}
+
+describe("installAnnounceWithoutActMonitor — steer-mode dispatch", () => {
+	const originalEnv = process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER;
+	beforeEach(() => {
+		delete process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER;
+	});
+	afterEach(() => {
+		if (originalEnv === undefined) delete process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER;
+		else process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER = originalEnv;
+	});
+
+	it("dispatches a steer message when steer=true and fires", async () => {
+		const { pi, handlers, appended, sent } = makePiStub();
+		installAnnounceWithoutActMonitor(pi, { steer: true });
+		await handlers["agent_end"]!({ type: "agent_end" }, makeCtxWithBranch(makeFiringBranch()));
+		await flushSetTimeout();
+		expect(appended.length).toBe(1);
+		expect((appended[0]!.entry as { steered: boolean }).steered).toBe(true);
+		expect((appended[0]!.entry as { mode: string }).mode).toBe("steer");
+		expect(sent.length).toBe(1);
+		expect(sent[0]!.customType).toBe("announce-without-act-recovery");
+		expect(sent[0]!.content).toMatch(/announced intent without executing/);
+		expect(sent[0]!.opts.deliverAs).toBe("steer");
+		expect(sent[0]!.opts.triggerTurn).toBe(true);
+	});
+
+	it("does NOT dispatch steer when steer=false (observe-mode default; backward compat)", async () => {
+		const { pi, handlers, appended, sent } = makePiStub();
+		installAnnounceWithoutActMonitor(pi /* no steer */);
+		await handlers["agent_end"]!({ type: "agent_end" }, makeCtxWithBranch(makeFiringBranch()));
+		await flushSetTimeout();
+		expect(appended.length).toBe(1);
+		expect((appended[0]!.entry as { steered: boolean }).steered).toBe(false);
+		expect((appended[0]!.entry as { mode: string }).mode).toBe("observe");
+		expect(sent.length).toBe(0);
+	});
+
+	it("PI_ANNOUNCE_WITHOUT_ACT_STEER=off suppresses dispatch but keeps observe audit", async () => {
+		process.env.PI_ANNOUNCE_WITHOUT_ACT_STEER = "off";
+		const { pi, handlers, appended, sent } = makePiStub();
+		installAnnounceWithoutActMonitor(pi, { steer: true });
+		await handlers["agent_end"]!({ type: "agent_end" }, makeCtxWithBranch(makeFiringBranch()));
+		await flushSetTimeout();
+		expect(appended.length).toBe(1);
+		expect((appended[0]!.entry as { steered: boolean }).steered).toBe(false);
+		// mode field still reports "steer" (install-time decision) — the override
+		// affects DISPATCH, not the install-mode label
+		expect((appended[0]!.entry as { mode: string }).mode).toBe("steer");
+		expect(sent.length).toBe(0);
+	});
+
+	it("loop-limit: does NOT re-dispatch steer on second fire for same userMessageId", async () => {
+		const { pi, handlers, appended, sent } = makePiStub();
+		installAnnounceWithoutActMonitor(pi, { steer: true });
+		const branch = makeFiringBranch();
+		await handlers["agent_end"]!({ type: "agent_end" }, makeCtxWithBranch(branch));
+		await flushSetTimeout();
+		await handlers["agent_end"]!({ type: "agent_end" }, makeCtxWithBranch(branch));
+		await flushSetTimeout();
+		// Two audit entries (one normal fire + one loop-limit), but one steer dispatch
+		expect(appended.length).toBe(2);
+		expect(sent.length).toBe(1);
+		expect((appended[1]!.entry as { reason?: string }).reason).toMatch(/loop-limit/);
 	});
 });

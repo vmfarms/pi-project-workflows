@@ -37,6 +37,7 @@ import nunjucks from "nunjucks";
 import { installAnnounceWithoutActMonitor } from "./heuristic-announce-without-act.js";
 import { installNullOutputMonitor } from "./heuristic-null-output.js";
 import { installThinkingLoopMonitor } from "./heuristic-thinking-loop.js";
+import { installWrapperBypassMonitor } from "./heuristic-wrapper-bypass.js";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 /**
@@ -1966,10 +1967,15 @@ export default function (pi: ExtensionAPI) {
 
 	// Heuristic announce-without-act monitor — sibling to null-output. Targets
 	// the "substantive announce-intent visible + zero tool calls + stop"
-	// failure shape (2+ recurrence in Phase 5: phase5-t2-2 boundary, iter-30
-	// canonical). Currently OBSERVE-MODE (no steer dispatch). Respects
-	// `monitorsEnabled` and `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off` env override.
-	installAnnounceWithoutActMonitor(pi, { isEnabled: () => monitorsEnabled });
+	// failure shape. PROMOTED TO STEER-MODE 2026-05-31 (T-Monitors-Bundle
+	// PRIMARY-5) after 9 production fires in a single day on ansible-v3 with
+	// zero observed false positives — meets the promotion bar of "≥2 accurate
+	// fires + stable-period without FPs" from the original observe-mode ship
+	// (T-OpsMonitor-AnnounceWithoutAct, 2026-05-28). Respects `monitorsEnabled`
+	// and TWO env overrides: PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off hard-disables
+	// the whole monitor; PI_ANNOUNCE_WITHOUT_ACT_STEER=off keeps observe-mode
+	// audit but suppresses the steer dispatch (fail-soft toggle).
+	installAnnounceWithoutActMonitor(pi, { isEnabled: () => monitorsEnabled, steer: true });
 
 	// Heuristic thinking-loop monitor — sibling to announce-without-act +
 	// null-output. Targets the "thinking block repeats the same paragraph
@@ -1978,6 +1984,14 @@ export default function (pi: ExtensionAPI) {
 	// 2026-05-31). Currently OBSERVE-MODE (no steer dispatch). Respects
 	// `monitorsEnabled` and `PI_THINKING_LOOP_MONITOR=off` env override.
 	installThinkingLoopMonitor(pi, { isEnabled: () => monitorsEnabled });
+
+	// Heuristic wrapper-bypass monitor — sibling to the three above. Targets
+	// the "agent built raw `sudo docker SUBCMD` through ssh_exec when a
+	// shipped pi-vmfarms-tools wrapper exists for SUBCMD" failure shape
+	// (n=5 across 4 iters surfaced by T-Tool-Candidates-LLM-WorkerDirect-Run
+	// 2026-05-31). Currently OBSERVE-MODE (no steer dispatch). Respects
+	// `monitorsEnabled` and `PI_WRAPPER_BYPASS_MONITOR=off` env override.
+	installWrapperBypassMonitor(pi, { isEnabled: () => monitorsEnabled });
 
 	const { monitors, overrides } = discoverMonitors();
 	loadedMonitors = monitors;
