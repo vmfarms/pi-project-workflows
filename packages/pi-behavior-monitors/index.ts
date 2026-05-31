@@ -36,6 +36,7 @@ import nunjucks from "nunjucks";
 
 import { installAnnounceWithoutActMonitor } from "./heuristic-announce-without-act.js";
 import { installNullOutputMonitor } from "./heuristic-null-output.js";
+import { installThinkingLoopMonitor } from "./heuristic-thinking-loop.js";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 /**
@@ -1969,6 +1970,14 @@ export default function (pi: ExtensionAPI) {
 	// canonical). Currently OBSERVE-MODE (no steer dispatch). Respects
 	// `monitorsEnabled` and `PI_ANNOUNCE_WITHOUT_ACT_MONITOR=off` env override.
 	installAnnounceWithoutActMonitor(pi, { isEnabled: () => monitorsEnabled });
+
+	// Heuristic thinking-loop monitor — sibling to announce-without-act +
+	// null-output. Targets the "thinking block repeats the same paragraph
+	// 3+ times" pathology (2+ recurrence in Phase 5: v6 T8 wp-white-screen-
+	// redherring, T-Phase5-CoverageExpansion R7 ghost-db-mysql-rotation
+	// 2026-05-31). Currently OBSERVE-MODE (no steer dispatch). Respects
+	// `monitorsEnabled` and `PI_THINKING_LOOP_MONITOR=off` env override.
+	installThinkingLoopMonitor(pi, { isEnabled: () => monitorsEnabled });
 
 	const { monitors, overrides } = discoverMonitors();
 	loadedMonitors = monitors;
