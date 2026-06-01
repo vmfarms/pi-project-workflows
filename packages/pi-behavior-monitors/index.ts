@@ -38,6 +38,7 @@ import { installAnnounceWithoutActMonitor } from "./heuristic-announce-without-a
 import { installAntThinkingTextLoopMonitor } from "./heuristic-anthinking-text-loop.js";
 import { installNullOutputMonitor } from "./heuristic-null-output.js";
 import { installThinkingLoopMonitor } from "./heuristic-thinking-loop.js";
+import { installPostBudgetGuardrailMonitor } from "./heuristic-post-budget-guardrail.js";
 import { installWrapperBypassMonitor } from "./heuristic-wrapper-bypass.js";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -2009,6 +2010,15 @@ export default function (pi: ExtensionAPI) {
 	// MONITOR=off hard-disables the whole monitor; PI_WRAPPER_BYPASS_STEER=off
 	// keeps observe-mode audit but suppresses the steer dispatch (fail-soft).
 	installWrapperBypassMonitor(pi, { isEnabled: () => monitorsEnabled, steer: true });
+
+	// Heuristic post-budget guardrail — observe-mode only, operator-authorized
+	// 2026-05-31 as "additive monitor, not budget change"
+	// (T-Monitor-PromptFix-PreEmptive-Bundle PRIMARY-2). Fires when
+	// per-turn tool-call count crosses 0.9 ratio of the parsed budget (default
+	// 20). Pre-renders steer text into steerSuggestions[] so a future steer-
+	// mode promotion is a one-line flip. Respects PI_POST_BUDGET_GUARDRAIL_
+	// MONITOR=off env override for replay-harness suppression.
+	installPostBudgetGuardrailMonitor(pi, { isEnabled: () => monitorsEnabled });
 
 	const { monitors, overrides } = discoverMonitors();
 	loadedMonitors = monitors;
