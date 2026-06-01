@@ -35,6 +35,7 @@ import { Box, Text } from "@mariozechner/pi-tui";
 import nunjucks from "nunjucks";
 
 import { installAnnounceWithoutActMonitor } from "./heuristic-announce-without-act.js";
+import { installAntThinkingTextLoopMonitor } from "./heuristic-anthinking-text-loop.js";
 import { installNullOutputMonitor } from "./heuristic-null-output.js";
 import { installThinkingLoopMonitor } from "./heuristic-thinking-loop.js";
 import { installWrapperBypassMonitor } from "./heuristic-wrapper-bypass.js";
@@ -1978,20 +1979,36 @@ export default function (pi: ExtensionAPI) {
 	installAnnounceWithoutActMonitor(pi, { isEnabled: () => monitorsEnabled, steer: true });
 
 	// Heuristic thinking-loop monitor — sibling to announce-without-act +
-	// null-output. Targets the "thinking block repeats the same paragraph
-	// 3+ times" pathology (2+ recurrence in Phase 5: v6 T8 wp-white-screen-
-	// redherring, T-Phase5-CoverageExpansion R7 ghost-db-mysql-rotation
-	// 2026-05-31). Currently OBSERVE-MODE (no steer dispatch). Respects
-	// `monitorsEnabled` and `PI_THINKING_LOOP_MONITOR=off` env override.
+	// null-output. Targets the family of thinking-block paragraph-repeat
+	// pathologies. Shape #1 (LONG-REPEAT): v6 T8 wp-white-screen-redherring +
+	// T-Phase5-CoverageExpansion R7 (now correctly attributed to Shape #3,
+	// see below). Shape #2 (POST-BUDGET, T-Phase5-BreakFix-Bundle S1 SPEC-143
+	// 2026-05-31): short-paragraph prefix repetition after tool budget
+	// exhausted (n=1 trial, 174× prefix repeat). Both shapes ship in
+	// OBSERVE-MODE (no steer dispatch). Respects `monitorsEnabled` and
+	// `PI_THINKING_LOOP_MONITOR=off` env override.
 	installThinkingLoopMonitor(pi, { isEnabled: () => monitorsEnabled });
 
-	// Heuristic wrapper-bypass monitor — sibling to the three above. Targets
+	// Heuristic antThinking-text-loop monitor — sibling to thinking-loop.
+	// Targets Shape #3 of the loop family: paragraph-repeat inside
+	// `<antThinking>…</antThinking>` pseudo-XML wrappers in TEXT content
+	// blocks (not proper THINKING blocks). Canonical fixture R7 ghost-db
+	// 2026-05-31 with 22× / 37× short-paragraph repeats. Different content
+	// channel from the thinking-loop monitor; complementary not redundant.
+	// OBSERVE-MODE (no steer dispatch). Respects `monitorsEnabled` and
+	// `PI_ANTTHINKING_TEXT_LOOP_MONITOR=off` env override.
+	installAntThinkingTextLoopMonitor(pi, { isEnabled: () => monitorsEnabled });
+
+	// Heuristic wrapper-bypass monitor — sibling to the four above. Targets
 	// the "agent built raw `sudo docker SUBCMD` through ssh_exec when a
 	// shipped pi-vmfarms-tools wrapper exists for SUBCMD" failure shape
 	// (n=5 across 4 iters surfaced by T-Tool-Candidates-LLM-WorkerDirect-Run
-	// 2026-05-31). Currently OBSERVE-MODE (no steer dispatch). Respects
-	// `monitorsEnabled` and `PI_WRAPPER_BYPASS_MONITOR=off` env override.
-	installWrapperBypassMonitor(pi, { isEnabled: () => monitorsEnabled });
+	// 2026-05-31). PROMOTED TO STEER-MODE 2026-05-31 (T-Monitor-
+	// ThinkingLoopShapes-Bundle PRIMARY-3) after 0 FPs across the corpus.
+	// Respects `monitorsEnabled` and TWO env overrides: PI_WRAPPER_BYPASS_
+	// MONITOR=off hard-disables the whole monitor; PI_WRAPPER_BYPASS_STEER=off
+	// keeps observe-mode audit but suppresses the steer dispatch (fail-soft).
+	installWrapperBypassMonitor(pi, { isEnabled: () => monitorsEnabled, steer: true });
 
 	const { monitors, overrides } = discoverMonitors();
 	loadedMonitors = monitors;

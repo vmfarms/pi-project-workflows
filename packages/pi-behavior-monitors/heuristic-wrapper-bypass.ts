@@ -271,7 +271,11 @@ export function installWrapperBypassMonitor(
 	const mode: "observe" | "steer" = opts.steer ? "steer" : "observe";
 
 	if (process.env.PI_WRAPPER_BYPASS_MONITOR !== "off") {
-		console.error(`[wrapper-bypass] heuristic monitor installed (message_end hook, mode=${mode})`);
+		const steerSuffix =
+			mode === "steer" && process.env.PI_WRAPPER_BYPASS_STEER === "off"
+				? " (steer dispatch DISABLED via PI_WRAPPER_BYPASS_STEER=off; observe-mode audit still active)"
+				: "";
+		console.error(`[wrapper-bypass] heuristic monitor installed (message_end hook, mode=${mode})${steerSuffix}`);
 	} else {
 		console.error("[wrapper-bypass] heuristic monitor DISABLED via PI_WRAPPER_BYPASS_MONITOR=off");
 	}
@@ -309,11 +313,24 @@ export function installWrapperBypassMonitor(
 		const dedupedMetrics: WrapperBypassMetrics = { ...metrics, matches: newMatches };
 		const steerSuggestions = newMatches.map(renderSteerText);
 
+		// Steer-mode promotion (T-Monitor-ThinkingLoopShapes-Bundle PRIMARY-3,
+		// 2026-05-31). At observe-mode promotion threshold n=5 with 0 FPs from
+		// T-Tool-Candidates-LLM-WorkerDirect-Run + iter-23 corpus. Steer text
+		// is already pre-computed in steerSuggestions; we dispatch the
+		// concatenation (one steer message per turn carrying all matches —
+		// keeps a single deferred sendMessage call simple and avoids cascading
+		// multiple steers within one turn). The env toggle
+		// PI_WRAPPER_BYPASS_STEER=off short-circuits the dispatch while
+		// preserving the audit entry — mirrors heuristic-announce-without-act
+		// lines 243-245 + 286, the fail-soft pattern operators use to yank
+		// noisy steer in place without losing the signal.
+		const steerActive = mode === "steer" && process.env.PI_WRAPPER_BYPASS_STEER !== "off";
+
 		const entry: WrapperBypassAuditEntry = {
 			timestamp: new Date().toISOString(),
 			fired: true,
 			mode,
-			steered: false,
+			steered: steerActive,
 			metrics: dedupedMetrics,
 			steerSuggestions,
 			reason: decision.reason,
@@ -321,13 +338,34 @@ export function installWrapperBypassMonitor(
 		audit.push(entry);
 		pi.appendEntry(WRAPPER_BYPASS_MONITOR_NAME, entry);
 
-		// Observe-mode: stop here. No steer dispatch. Promotion path:
-		//   1. accumulate ≥2 accurate wild fires + ≥1 stable-period without
-		//      FPs on the corpus (cross-iter aggregator surfaces both)
-		//   2. spec a follow-up track that flips opts.steer = true + wires a
-		//      setTimeout(0)-deferred sendMessage analogous to null-output's
-		//      pattern at line 213-222 of heuristic-null-output.ts. The steer
-		//      text is already pre-computed in entry.steerSuggestions.
+		if (steerActive) {
+			// Deferred dispatch — see iter-18 wiring-gap fix in index.ts:
+			// 1788-1808 and heuristic-announce-without-act.ts lines 293-312.
+			// During message_end the Agent is still inside runWithLifecycle
+			// (isStreaming = true); a direct sendMessage({deliverAs:"steer",
+			// triggerTurn:true}) gets queued into steeringQueue with no
+			// consumer in scripted RPC mode. setTimeout(0) defers past
+			// finishRun() so the prompt() branch fires and a fresh
+			// agent_start/agent_end cycle runs.
+			//
+			// Steer payload: the first suggestion (single-match case is the
+			// dominant shape in the wild — 91% of observed fires have ≤1
+			// wrapper match per message; multi-match messages join with
+			// newline so the LLM sees all bypass-instances pointed out in
+			// one steer). One steer per turn keeps the agent from being
+			// flooded with multiple parallel re-trigger turns.
+			const steerText = steerSuggestions.join("\n");
+			setTimeout(() => {
+				pi.sendMessage(
+					{
+						customType: "wrapper-bypass-recovery",
+						content: steerText,
+						display: true,
+					},
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+			}, 0);
+		}
 	});
 
 	return { audit };

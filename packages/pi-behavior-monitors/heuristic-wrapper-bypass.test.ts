@@ -4,6 +4,7 @@ import {
 	detectWrapperBypass,
 	DOCKER_EXEC_RE,
 	DOCKER_WRAPPER_PATTERNS,
+	installWrapperBypassMonitor,
 	renderSteerText,
 	shouldFire,
 } from "./heuristic-wrapper-bypass.js";
@@ -300,5 +301,199 @@ describe("DOCKER_WRAPPER_PATTERNS — invariants", () => {
 	it("does NOT include `exec` (no shipped wrapper)", () => {
 		const subcmds = DOCKER_WRAPPER_PATTERNS.map((p) => p.subcmd);
 		expect(subcmds).not.toContain("exec");
+	});
+});
+
+// =============================================================================
+// installWrapperBypassMonitor — steer-mode (T-Monitor-ThinkingLoopShapes-Bundle
+// PRIMARY-3, 2026-05-31). Promotion from observe-mode after n=5 fires with 0
+// FPs from T-Tool-Candidates-LLM-WorkerDirect-Run + iter-23 corpus.
+// =============================================================================
+
+interface PiStubSentMessage {
+	customMsg: { customType?: string; content?: string; display?: boolean };
+	opts: { deliverAs?: string; triggerTurn?: boolean };
+}
+
+function makePiStub() {
+	const handlers: Record<string, (ev: unknown, ctx: unknown) => Promise<void> | void> = {};
+	const appended: Array<{ name: string; entry: unknown }> = [];
+	const sent: PiStubSentMessage[] = [];
+	const pi = {
+		on(event: string, handler: (ev: unknown, ctx: unknown) => Promise<void> | void) {
+			handlers[event] = handler;
+		},
+		appendEntry(name: string, entry: unknown) {
+			appended.push({ name, entry });
+		},
+		sendMessage(customMsg: unknown, opts: unknown) {
+			sent.push({
+				customMsg: customMsg as PiStubSentMessage["customMsg"],
+				opts: opts as PiStubSentMessage["opts"],
+			});
+		},
+	} as never;
+	return { pi, handlers, appended, sent };
+}
+
+function makeCtxWithBranch(branch: unknown[]) {
+	return { sessionManager: { getBranch: () => branch } } as never;
+}
+
+async function flushSetTimeout() {
+	// setTimeout(0)-deferred dispatch needs one event-loop tick to land.
+	await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("installWrapperBypassMonitor — steer-mode dispatch", () => {
+	it("dispatches a setTimeout(0)-deferred sendMessage when opts.steer=true and a fire happens", async () => {
+		const { pi, handlers, sent, appended } = makePiStub();
+		installWrapperBypassMonitor(pi, { steer: true });
+		const msg = makeAssistantMessage({
+			toolCalls: [makeSshExecCall({ command: "sudo docker logs wordpress_db" })],
+		});
+		await handlers["message_end"]!(
+			{ message: { ...msg, role: "assistant" } },
+			makeCtxWithBranch(makeBranch(msg)),
+		);
+		await flushSetTimeout();
+		expect(sent.length).toBe(1);
+		const dispatched = sent[0]!;
+		expect(dispatched.customMsg.customType).toBe("wrapper-bypass-recovery");
+		expect(dispatched.customMsg.content).toContain("docker_logs");
+		expect(dispatched.customMsg.display).toBe(true);
+		expect(dispatched.opts.deliverAs).toBe("steer");
+		expect(dispatched.opts.triggerTurn).toBe(true);
+		// Audit entry should flag steered=true
+		expect((appended[0]!.entry as { steered?: boolean }).steered).toBe(true);
+	});
+
+	it("does NOT dispatch sendMessage in observe-mode (default; steer:false)", async () => {
+		const { pi, handlers, sent, appended } = makePiStub();
+		installWrapperBypassMonitor(pi); // observe-mode default
+		const msg = makeAssistantMessage({
+			toolCalls: [makeSshExecCall({ command: "sudo docker logs wordpress_db" })],
+		});
+		await handlers["message_end"]!(
+			{ message: { ...msg, role: "assistant" } },
+			makeCtxWithBranch(makeBranch(msg)),
+		);
+		await flushSetTimeout();
+		expect(sent.length).toBe(0);
+		// Audit entry should NOT flag steered (observe-mode)
+		expect((appended[0]!.entry as { steered?: boolean }).steered).toBe(false);
+		expect((appended[0]!.entry as { mode?: string }).mode).toBe("observe");
+	});
+
+	it("respects PI_WRAPPER_BYPASS_STEER=off: audit entry persists but no dispatch", async () => {
+		process.env.PI_WRAPPER_BYPASS_STEER = "off";
+		try {
+			const { pi, handlers, sent, appended } = makePiStub();
+			installWrapperBypassMonitor(pi, { steer: true });
+			const msg = makeAssistantMessage({
+				toolCalls: [makeSshExecCall({ command: "sudo docker logs wordpress_db" })],
+			});
+			await handlers["message_end"]!(
+				{ message: { ...msg, role: "assistant" } },
+				makeCtxWithBranch(makeBranch(msg)),
+			);
+			await flushSetTimeout();
+			expect(sent.length).toBe(0); // dispatch suppressed
+			expect(appended.length).toBe(1); // but audit fires
+			expect((appended[0]!.entry as { steered?: boolean }).steered).toBe(false); // accurately reflects no-dispatch
+			expect((appended[0]!.entry as { mode?: string }).mode).toBe("steer"); // mode is still steer
+		} finally {
+			delete process.env.PI_WRAPPER_BYPASS_STEER;
+		}
+	});
+
+	it("joins multi-match steerSuggestions with newline in the dispatched content", async () => {
+		const { pi, handlers, sent } = makePiStub();
+		installWrapperBypassMonitor(pi, { steer: true });
+		// Two ssh_exec calls in one message, both wrapper-bypass.
+		const msg = makeAssistantMessage({
+			toolCalls: [
+				makeSshExecCall({ id: "tc-1", command: "sudo docker logs wordpress_db" }),
+				makeSshExecCall({ id: "tc-2", command: "sudo docker ps" }),
+			],
+		});
+		await handlers["message_end"]!(
+			{ message: { ...msg, role: "assistant" } },
+			makeCtxWithBranch(makeBranch(msg)),
+		);
+		await flushSetTimeout();
+		expect(sent.length).toBe(1);
+		const content = sent[0]!.customMsg.content ?? "";
+		expect(content).toContain("docker_logs");
+		expect(content).toContain("docker_ps");
+		expect(content.split("\n").length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("does NOT dispatch when shouldFire returns false (no wrapper-bypass present)", async () => {
+		const { pi, handlers, sent, appended } = makePiStub();
+		installWrapperBypassMonitor(pi, { steer: true });
+		const msg = makeAssistantMessage({
+			toolCalls: [makeSshExecCall({ command: "uptime" })],
+		});
+		await handlers["message_end"]!(
+			{ message: { ...msg, role: "assistant" } },
+			makeCtxWithBranch(makeBranch(msg)),
+		);
+		await flushSetTimeout();
+		expect(sent.length).toBe(0);
+		expect(appended.length).toBe(0);
+	});
+
+	it("loop-limit: same toolCallId across re-emitted message_end fires once, dispatches once", async () => {
+		const { pi, handlers, sent } = makePiStub();
+		installWrapperBypassMonitor(pi, { steer: true });
+		const msg = makeAssistantMessage({
+			toolCalls: [makeSshExecCall({ id: "tc-dedupe", command: "sudo docker logs wordpress_db" })],
+		});
+		const ctx = makeCtxWithBranch(makeBranch(msg));
+
+		await handlers["message_end"]!({ message: { ...msg, role: "assistant" } }, ctx);
+		await flushSetTimeout();
+		expect(sent.length).toBe(1);
+
+		// Re-emit identical event: loop-limit suppresses; no second dispatch.
+		await handlers["message_end"]!({ message: { ...msg, role: "assistant" } }, ctx);
+		await flushSetTimeout();
+		expect(sent.length).toBe(1);
+	});
+
+	it("steer mode does NOT engage when PI_WRAPPER_BYPASS_MONITOR=off (hard-disable)", async () => {
+		process.env.PI_WRAPPER_BYPASS_MONITOR = "off";
+		try {
+			const { pi, handlers, sent, appended } = makePiStub();
+			installWrapperBypassMonitor(pi, { steer: true });
+			const msg = makeAssistantMessage({
+				toolCalls: [makeSshExecCall({ command: "sudo docker logs wordpress_db" })],
+			});
+			await handlers["message_end"]!(
+				{ message: { ...msg, role: "assistant" } },
+				makeCtxWithBranch(makeBranch(msg)),
+			);
+			await flushSetTimeout();
+			expect(sent.length).toBe(0);
+			expect(appended.length).toBe(0);
+		} finally {
+			delete process.env.PI_WRAPPER_BYPASS_MONITOR;
+		}
+	});
+
+	it("respects isEnabled() callback returning false (no fire, no dispatch)", async () => {
+		const { pi, handlers, sent, appended } = makePiStub();
+		installWrapperBypassMonitor(pi, { steer: true, isEnabled: () => false });
+		const msg = makeAssistantMessage({
+			toolCalls: [makeSshExecCall({ command: "sudo docker logs wordpress_db" })],
+		});
+		await handlers["message_end"]!(
+			{ message: { ...msg, role: "assistant" } },
+			makeCtxWithBranch(makeBranch(msg)),
+		);
+		await flushSetTimeout();
+		expect(sent.length).toBe(0);
+		expect(appended.length).toBe(0);
 	});
 });
