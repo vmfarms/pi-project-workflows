@@ -37,9 +37,10 @@ import nunjucks from "nunjucks";
 import { installAnnounceWithoutActMonitor } from "./heuristic-announce-without-act.js";
 import { installAntThinkingTextLoopMonitor } from "./heuristic-anthinking-text-loop.js";
 import { installNullOutputMonitor } from "./heuristic-null-output.js";
-import { installThinkingLoopMonitor } from "./heuristic-thinking-loop.js";
 import { installPostBudgetGuardrailMonitor } from "./heuristic-post-budget-guardrail.js";
+import { installThinkingLoopMonitor } from "./heuristic-thinking-loop.js";
 import { installWrapperBypassMonitor } from "./heuristic-wrapper-bypass.js";
+import { installWrapperFormFixationMonitor } from "./heuristic-wrapper-form-fixation.js";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 /**
@@ -2010,6 +2011,20 @@ export default function (pi: ExtensionAPI) {
 	// MONITOR=off hard-disables the whole monitor; PI_WRAPPER_BYPASS_STEER=off
 	// keeps observe-mode audit but suppresses the steer dispatch (fail-soft).
 	installWrapperBypassMonitor(pi, { isEnabled: () => monitorsEnabled, steer: true });
+
+	// Heuristic wrapper-form-fixation monitor — sibling to wrapper-bypass,
+	// complementary not redundant. Targets the inverse shape: agent
+	// stringifies a structured-arg tool invocation into bash's `command`
+	// argument (e.g., `bash command='ssh_exec_docker host="X" command="..."'`)
+	// instead of invoking the tool natively. n=2 recurrence reached on
+	// 2026-06-02 (Memory-Phase5 S11 + Wrapper-Remeasure S11; same prompt +
+	// same agent shape). PROMOTED TO STEER-MODE at first-ship per the
+	// `feedback_extension_monitor_promotion_threshold_2plus` discipline.
+	// Respects `monitorsEnabled` and TWO env overrides:
+	// PI_WRAPPER_FORM_FIXATION_MONITOR=off hard-disables the whole monitor;
+	// PI_WRAPPER_FORM_FIXATION_STEER=off keeps observe-mode audit but
+	// suppresses the steer dispatch (fail-soft toggle).
+	installWrapperFormFixationMonitor(pi, { isEnabled: () => monitorsEnabled, steer: true });
 
 	// Heuristic post-budget guardrail — observe-mode only, operator-authorized
 	// 2026-05-31 as "additive monitor, not budget change"
